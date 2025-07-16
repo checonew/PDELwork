@@ -1,0 +1,349 @@
+module karatsuba_multiplier_clk(
+    input clk, // Clock signal
+    input enable, // Control signal
+    input [15:0] x, // 16-bit input
+    input [15:0] y, // 16-bit input
+    output reg [31:0] result // 32-bit output 
+);
+
+    // Split inputs into high and low parts
+    wire [7:0] x_high, x_low, y_high, y_low;
+    assign x_high = x[15:8];
+    assign x_low = x[7:0];
+    assign y_high = y[15:8];
+    assign y_low = y[7:0];
+
+    // Partial products
+    wire [15:0] p1, p2;
+    assign p1 = x_high * y_high; // High parts product
+    assign p2 = x_low * y_low; // Low parts product
+
+    // Wires for sums of splits (A + B) and (C + D)
+    wire [8:0] ab_sum, cd_sum;
+    wire [15:0] ab_sum_ext, cd_sum_ext;
+
+    assign ab_sum_ext = {1'b0, ab_sum};
+    assign cd_sum_ext = {1'b0, cd_sum};
+
+    // Instantiate Brent-Kung adders
+    brent_kung_adder bk_adder1 (
+        .A(x_high),
+        .B(x_low),
+        .Sum(ab_sum[7:0]),
+        .Cout(ab_sum[8])
+    );
+
+    brent_kung_adder bk_adder2 (
+        .A(y_high),
+        .B(y_low),
+        .Sum(cd_sum[7:0]),
+        .Cout(cd_sum[8])
+    );
+
+    // Multiply results of (A + B) and (C + D)
+    wire [17:0] p3_mult;
+    assign p3_mult = ab_sum_ext * cd_sum_ext; // 18-bit product
+
+    // Subtract p1 and p2 from p3_temp
+    wire [17:0] p3_temp;
+    assign p3_temp = p3_mult - {2'b0, p1} - {2'b0, p2};
+
+    // Combine results for the final product
+    wire [31:0] computed_result;
+    assign computed_result = (p1 << 16) + (p3_temp[15:0] << 8) + p2;
+
+    // Clock-driven result update
+    always @(posedge clk) begin
+        if (enable) begin
+            result <= computed_result;
+        end
+    end
+
+endmodule
+
+// Structural Brent-Kung Adder
+module brent_kung_adder (
+    input [7:0] A,
+    input [7:0] B,
+    output [7:0] Sum,
+    output Cout
+);
+
+    // Internal wires for Generate (G), Propagate (P), and Carry (C)
+    wire [7:0] G, P, C;
+
+    // Step 1: Generate and Propagate
+    genvar i;
+    generate
+        for (i = 0; i < 8; i = i + 1) begin : gen_prop
+            assign G[i] = A[i] & B[i]; // Generate
+            assign P[i] = A[i] ^ B[i]; // Propagate
+        end
+    endgenerate
+
+    // Step 2: Compute Carry using Brent-Kung logic
+    assign C[0] = 0; // No carry into LSB
+    generate
+        for (i = 1; i < 8; i = i + 1) begin : compute_carry
+            assign C[i] = (P[i-1] & C[i-1]) | G[i-1];
+        end
+    endgenerate
+
+    // Step 3: Compute Sum
+    assign Sum = P ^ C;
+    assign Cout = C[7];
+
+endmodule
+
+
+------------------------------------------------
+
+TESTBENCH:
+-----------
+
+`timescale 1ns / 1ps
+
+module karatsuba_multiplier_clk_tb;
+    reg clk;
+    reg enable;
+    reg [15:0] x;
+    reg [15:0] y;
+    wire [31:0] result;
+
+    // Instantiate the module
+    karatsuba_multiplier_clk uut (
+        .clk(clk),
+        .enable(enable),
+        .x(x),
+        .y(y),
+        .result(result)
+    );
+
+    // Clock generation
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk; // 10-time-unit clock period
+    end
+
+    initial begin
+        enable = 0; x = 16'd0; y = 16'd0;
+
+        #10 enable = 1; x = 16'd1234; y = 16'd5678; // Perform multiplication
+        #20 enable = 0; // Disable computation
+        #10 x = 16'd3647; y = 16'd6738; // Inputs change but no computation
+        #10 enable = 1; // Enable computation
+        #30 $finish;
+    end
+endmodule
+
+------------------------------------------------------
+
+SDC:
+----
+# Define the clock
+create_clock -name clk -period 10 [get_ports clk]
+
+# Set clock uncertainty (jitter)
+set_clock_uncertainty 0.5 [get_clocks clk]
+
+# Set input delays
+set_input_delay 2 -clock clk [get_ports {x y enable}]
+
+# Set output delays
+set_output_delay 3 -clock clk [get_ports result]
+
+# Set capacitive load on output pins
+set_load 0.1 [get_ports result]
+
+--------------------------------------------------------------
+
+RUN TCL (synthesis):
+---------------------
+
+# Set the library and HDL search paths
+set_db lib_search_path /home/pgvlsi6/Digital/lib/slow.lib
+set_db hdl_search_path /home/pgvlsi6/Digital/RTL/e1.v
+
+# Specify the library for synthesis
+set_db library /home/pgvlsi6/Digital/lib/slow.lib
+
+# Read the HDL design for Karatsuba multiplier with Brent-Kung adder
+read_hdl ./RTL/e1.v
+
+# Elaborate the design (compile the HDL into a netlist)
+elaborate
+
+# Read the SDC constraints file for the design
+read_sdc /home/pgvlsi6/Digital/RTL/e1_sdc.sdc
+
+# Synthesize the design with medium effort
+set_db syn_generic_effort medium
+set_db syn_map_effort medium
+set_db syn_opt_effort medium
+
+syn_generic
+syn_map
+syn_opt
+
+# Write out the updated HDL and constraints after synthesis
+write_hdl > ./outputs/e1_netlist.v
+write_sdc > ./outputs/e1_sdc.sdc
+
+------------------------------------------------------------
+
+
+Default.Global File Contents
+----------------------------
+
+set conf_qxconf_file {NULL}
+set conf_qxlib_file {NULL}
+set defHierChar {/}
+set init_design_settop 0
+set init_gnd_net {VSS}
+set init_lef_file {LIBS/lef/gsclib045.fixed2.lef LIBS/lef/pads.lef}    // Change Here
+set init_mmmc_file {DATA/mmmc.tcl}
+set init_pwr_net {VDD}
+set init_verilog {home/pgvlsi6/Digital/outputs/e1_netlist.v}           // Change Here
+set lsgOCPGainMult 1.000000
+
+----------------------------------------------------------------
+
+MCMM File
+---------
+
+create_library_set -name fast\
+   -timing\
+    [list LIBS/lib/min/fast.lib\
+    LIBS/lib/min/MEM1_256X32_slow.lib\
+    LIBS/lib/min/MEM2_128X32_slow.lib]
+create_library_set -name slow\
+   -timing\
+    [list LIBS/lib/max/slow.lib\
+    LIBS/lib/min/MEM1_256X32_slow.lib\
+    LIBS/lib/min/MEM2_128X32_slow.lib]
+create_rc_corner -name rc_best\
+   -cap_table LIBS/captbl/worst/capTable\
+   -preRoute_res 1.34236\
+   -postRoute_res 1.34236\
+   -preRoute_cap 1.10066\
+   -postRoute_cap 0.960235\
+   -postRoute_xcap 1.22327\
+   -preRoute_clkres 0\
+   -preRoute_clkcap 0\
+   -postRoute_clkcap {0.969117 0 0}\
+   -T 0\
+   -qx_tech_file LIBS/qx/qrcTechFile\
+   -qx_conf_file LIBS/qx/qrc.conf
+create_rc_corner -name rc_worst\
+   -cap_table LIBS/captbl/worst/capTable\
+   -preRoute_res 1.34236\
+   -postRoute_res 1.34236\
+   -preRoute_cap 1.10066\
+   -postRoute_cap 0.960234\
+   -postRoute_xcap 1.22327\
+   -preRoute_clkres 0\
+   -preRoute_clkcap 0\
+   -postRoute_clkcap {0.969117 0 0}\
+   -T 125\
+   -qx_tech_file LIBS/qx/qrcTechFile\
+   -qx_conf_file LIBS/qx/qrc.conf
+create_delay_corner -name slow_max\
+   -library_set slow\
+   -rc_corner rc_worst
+create_delay_corner -name fast_min\
+   -library_set fast\
+   -rc_corner rc_best
+create_constraint_mode -name functional_func_slow_max\
+   -sdc_files\
+    [list /home/pgvlsi6/Digital/RTL/e1_sdc.sdc]         // Change Here
+create_analysis_view -name func_slow_max -constraint_mode functional_func_slow_max -delay_corner slow_max
+create_analysis_view -name func_fast_min -constraint_mode functional_func_slow_max -delay_corner fast_min
+set_analysis_view -setup [list func_slow_max] -hold [list func_fast_min]
+
+-------------------------------------
+
+
+
+
+STEPS
+-----
+
+Invoke Genus and perform synthesis by sourcing run.tcl
+
+Invoke Innovus
+
+-> source ./DATA/default.globals
+
+-> init_design
+
+In GUI (block is present)
+
+Floorplan -> Specify Floorplan -> Ratio 1 -> Utilization 0.6 -> Core to Die -> All 4 columns as 2.5 -> Ok
+
+Power -> PowerPlanning -> Add Rings -> (click Files icon) Add Vdd & Vss -> Top & Bottom as Metal 9 -> Right & Left as Metal 8 -> Width 0.7, Spacing 0.2, Offset 0.5 (for all) -> Update -> Apply -> Ok
+
+Power -> PowerPlanning -> Add Stripes -> (click Files icon) Add Vdd & Vss -> Metal 8 -> Width 0.3, Spacing 0.15 -> Click No. of sets 3 -> Apply -> Ok
+
+Route -> Special Route -> (click Files icon) Add Vdd & Vss -> Apply -> Ok
+
+Place -> Physical Cell -> Add End Cap -> Fill2 ok -> Fill2 ok -> Apply -> Ok
+
+Place -> Physical Cell -> Add Well Tap -> Fill2 ok -> Distance Interval 35 -> Apply -> Ok
+
+Place -> Place Standard Cell -> Mode -> Enable Place IO Pins -> Apply -> Ok -> Apply -> Ok
+
+Eco -> Optimize Design -> Ok   // Can speify for Setup or Hold
+
+Timing -> Report Timing -> Setup -> Ok -> Check Report in Terminal
+Timing -> Report Timing -> Hold -> Ok -> Check Report in Terminal
+
+Save -> Innovus -> AnyName.enc
+
+
+
+Next Time you invoke innovus
+Goto File -> Restore Design -> Innovus -> Find your .enc file -> ok -> Click Physical View button on Top Right Corner
+
+
+------------------------------------------------------------------------------------------------------------------------------
+                                                             Next Lab
+------------------------------------------------------------------------------------------------------------------------------
+
+
+Clock -> CCOpt Clock Tree Debugger -> Ok -> Yes
+
+Timing -> Report Timing -> Post CTS-> Setup -> Ok -> Check Report in Terminal
+Timing -> Report Timing -> Post CTS-> Hold -> Ok -> Check Report in Terminal
+
+Eco -> Optimize Design -> Post CTS -> Ok        // Can speify for Setup or Hold
+
+
+
+Route -> NanoRoute -> Timing Drive, SI Driven Tick -> Apply -> Ok
+
+setAnalysisMode -analysisType onchipvariation -cppr both    //In Terminal
+
+Timing -> Report Timing -> Post Route -> Setup -> Ok -> Check Report in Terminal
+Timing -> Report Timing -> Post Route -> Hold -> Ok -> Check Report in Termin
+
+Eco -> Optimize Design -> Post Route -> Ok        // Can speify for Setup or Hold
+
+
+------------------------------------------------------------------------------------------------------------------------------
+                                                             Next Lab
+------------------------------------------------------------------------------------------------------------------------------
+
+Timing -> Extract RC -> save spef to (tick) (give desired name 1.spef) -> RC Corner to Output (select rc_best) -> OK
+Timing -> Extract RC -> save spef to (tick) (give desired name 2.spef) -> RC Corner to Output (select rc_worst) -> OK
+
+File -> Save -> Netlist -> (tick both) Give filename_netlist_PD.v -> OK
+
+Timing -> Write SDF (tick both) -> Active view : Func_fast_min -> SDF Output file (desired name 1.sdf) -> OK
+Timing -> Write SDF (tick both) -> Active view : Func_slow_max -> SDF Output file (desired name 2.sdf) -> OK
+
+Verify -> Verify DRC -> OK
+
+Verify -> Verify Connectivity -> OK
+
+Save -> Innovus -> AnyName.enc
+
